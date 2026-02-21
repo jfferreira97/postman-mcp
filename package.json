@@ -1,5 +1,5 @@
 {
-  "name": "pmcp",
+  "name": "postman-mcp",
   "version": "1.0.0",
   "description": "MCP server for Postman API — lets Claude Code read and write Postman collections natively",
   "type": "module",
@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "axios": "^1.13.5"
+    "axios": "^1.13.5",
+    "dotenv": "^17.3.1"
   },
   "devDependencies": {
     "@types/node": "^25.3.0",

@@ -1,4 +1,4 @@
-# pmcp
+# postman-mcp
 
 MCP server that lets Claude Code read and write Postman collections directly via the Postman API. No more manual export/import.
 
@@ -16,31 +16,31 @@ MCP server that lets Claude Code read and write Postman collections directly via
 
 ### 1. Get your Postman API key
 
-Go to [postman.com](https://postman.com) → Account Settings → API keys → Generate API key.
+Go to `{yourpostmanuser}.postman.co/settings/me/api-keys` or https://www.postman.co/settings/me/api-keys and click **Generate API Key**.
 
-### 2. Wire into Claude Code
+<!-- screenshot: docs/api-keys.png -->
 
-Edit `~/.claude/settings.json` and add:
+### 2. Install dependencies
 
-```json
-{
-  "mcpServers": {
-    "pmcp": {
-      "command": "npx",
-      "args": ["tsx", "C:/path/to/pmcp/index.ts"],
-      "env": {
-        "POSTMAN_API_KEY": "your-api-key-here"
-      }
-    }
-  }
-}
+```bash
+npm install
 ```
 
-Replace `C:/path/to/pmcp` with the actual path to this folder.
+### 3. Configure your API key
 
-### 3. Restart VS Code
+Copy `.env.example` to `.env` and fill in your key:
 
-Claude Code will pick up the new MCP server automatically.
+```bash
+cp .env.example .env
+```
+
+```env
+POSTMAN_API_KEY=your-api-key-here
+```
+
+### 4. Enable in Claude Code
+
+The `.mcp.json` in this repo is already configured. Open this folder in VS Code with the Claude Code extension, go to `/mcp` → **postman-mcp** → enable it.
 
 ## Usage
 
