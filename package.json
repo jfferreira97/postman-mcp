@@ -1,0 +1,19 @@
+{
+  "name": "pmcp",
+  "version": "1.0.0",
+  "description": "MCP server for Postman API — lets Claude Code read and write Postman collections natively",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "dev": "tsx watch index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "axios": "^1.13.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
