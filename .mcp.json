@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "postman-mcp": {
-      "command": "npx",
-      "args": ["tsx", "index.ts"]
+      "command": "cmd",
+      "args": ["/c", "npx", "tsx", "index.ts"]
     }
   }
 }
