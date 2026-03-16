@@ -35,14 +35,54 @@ server.tool("list_collections", "List all Postman collections in your workspace"
   };
 });
 
+function renderAuth(auth: any, scope: string): string {
+  if (!auth) return "";
+  if (auth.type === "noauth") return `[${scope}]: none — explicitly disables any inherited auth`;
+  const params = (auth[auth.type] ?? []).map((p: any) => `${p.key}=${p.value}`).join(", ");
+  return `[${scope}]: ${auth.type}${params ? ` (${params})` : ""}`;
+}
+
+function renderBody(body: any): string {
+  if (!body) return "";
+  if (body.mode === "raw") {
+    const raw = (body.raw ?? "").trim();
+    return raw.length > 400 ? raw.slice(0, 400) + "…" : raw;
+  }
+  if (body.mode === "urlencoded")
+    return (body.urlencoded ?? []).map((p: any) => `${p.key}=${p.value}`).join("&");
+  if (body.mode === "formdata")
+    return (body.formdata ?? []).map((p: any) => `${p.key}=${p.value}`).join(", ");
+  return "";
+}
+
+const SKIP_HEADERS = new Set(["content-type", "accept", "user-agent"]);
+
 function renderTree(items: any[], indent = 0): string {
   return items.map((item: any) => {
     const prefix = "  ".repeat(indent) + "└─ ";
+    const pad    = "  ".repeat(indent + 1) + "  ";
+
     if (item.item) {
-      return `${prefix}[folder] ${item.name}\n${renderTree(item.item, indent + 1)}`;
+      const authLine = item.auth ? `\n${pad}${renderAuth(item.auth, "folder-scoped-auth")}` : "";
+      return `${prefix}[folder] ${item.name}${authLine}\n${renderTree(item.item, indent + 1)}`;
     }
-    const method = item.request?.method ?? "?";
-    return `${prefix}[${method}] ${item.name}`;
+
+    const req    = item.request;
+    const method = req?.method ?? "?";
+    const url    = req?.url?.raw ?? req?.url ?? "";
+
+    const lines: string[] = [];
+
+    const auth = renderAuth(req?.auth, "request-scoped-auth");
+    if (auth) lines.push(`${pad}${auth}`);
+
+    const headers = (req?.header ?? []).filter((h: any) => !SKIP_HEADERS.has(h.key?.toLowerCase()));
+    if (headers.length) lines.push(`${pad}headers: ${headers.map((h: any) => `${h.key}: ${h.value}`).join(" | ")}`);
+
+    const body = renderBody(req?.body);
+    if (body) lines.push(`${pad}body: ${body}`);
+
+    return [`${prefix}[${method}] ${item.name}  →  ${url}`, ...lines].join("\n");
   }).join("\n");
 }
 
@@ -62,13 +102,29 @@ server.tool(
 
 server.tool(
   "get_collection",
-  "Fetch the full JSON of a Postman collection by its UID",
+  "Fetch a Postman collection — returns a compact digest with all variables (key=value) and all requests (method + URL), digestible without loading the full raw JSON",
   { uid: z.string().describe("The collection UID") },
   async ({ uid }) => {
     const { data } = await postman.get(`/collections/${uid}`);
-    return {
-      content: [{ type: "text", text: JSON.stringify(data.collection, null, 2) }],
-    };
+    const col = data.collection;
+
+    // Variables section
+    const vars: any[] = col.variable ?? [];
+    const varsSection = vars.length > 0
+      ? vars.map((v: any) => `${v.key} = ${v.value ?? ""}`).join("\n")
+      : "(none)";
+
+    // Auth section
+    const auth = col.auth;
+    const authSection = auth
+      ? `type: ${auth.type}\n` + (auth[auth.type] ?? []).map((p: any) => `  ${p.key} = ${p.value}`).join("\n")
+      : "(none)";
+
+    // Requests section (tree with URL)
+    const tree = renderTree(col.item ?? []);
+
+    const out = `=== ${col.info.name} ===\n\n--- COLLECTION-LEVEL AUTH (inherited by all requests unless overridden at folder/request level) ---\n${authSection}\n\n--- COLLECTION-LEVEL VARIABLES (available everywhere via {{varName}}) ---\n${varsSection}\n\n--- REQUESTS (auth inheritance: collection-level -> folder-scoped-auth overrides collection -> request-scoped-auth overrides folder) ---\n${tree}`;
+    return { content: [{ type: "text", text: out }] };
   }
 );
 
