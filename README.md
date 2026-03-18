@@ -46,6 +46,5 @@ The `.mcp.json` in this repo is already configured. Open this folder in VS Code 
 
 Just talk to Claude Code naturally:
 
-> "list my Postman collections"
-> "fetch my Open SharePoint collection and add a folder called Liquidações"
+> "fetch my M365 collection and add a folder for subsite {subsite} matching the pattern of endpoints we have on other subsite"
 > "update collection abc123 with this JSON: ..."
