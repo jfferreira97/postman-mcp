@@ -57,6 +57,20 @@ function renderBody(body: any): string {
 
 const SKIP_HEADERS = new Set(["content-type", "accept", "user-agent"]);
 
+function renderScripts(events: any[], pad: string, scope: "folder" | "request"): string[] {
+  if (!events?.length) return [];
+  const lines: string[] = [];
+  for (const ev of events) {
+    const exec: string[] = ev?.script?.exec ?? [];
+    const code = exec.join("\n").trim();
+    if (!code) continue;
+    const type = ev.listen === "prerequest" ? "pre-request" : "post-response";
+    const label = `${scope}-scoped ${type} script`;
+    lines.push(`${pad}[${label}]:\n${exec.map((l: string) => `${pad}  ${l}`).join("\n")}`);
+  }
+  return lines;
+}
+
 function renderTree(items: any[], indent = 0): string {
   return items.map((item: any) => {
     const prefix = "  ".repeat(indent) + "└─ ";
@@ -64,7 +78,9 @@ function renderTree(items: any[], indent = 0): string {
 
     if (item.item) {
       const authLine = item.auth ? `\n${pad}${renderAuth(item.auth, "folder-scoped-auth")}` : "";
-      return `${prefix}[folder] ${item.name}${authLine}\n${renderTree(item.item, indent + 1)}`;
+      const scriptLines = renderScripts(item.event, pad, "folder");
+      const scriptBlock = scriptLines.length ? "\n" + scriptLines.join("\n") : "";
+      return `${prefix}[folder] ${item.name}${authLine}${scriptBlock}\n${renderTree(item.item, indent + 1)}`;
     }
 
     const req    = item.request;
@@ -81,6 +97,8 @@ function renderTree(items: any[], indent = 0): string {
 
     const body = renderBody(req?.body);
     if (body) lines.push(`${pad}body: ${body}`);
+
+    lines.push(...renderScripts(item.event, pad, "request"));
 
     return [`${prefix}[${method}] ${item.name}  →  ${url}`, ...lines].join("\n");
   }).join("\n");
