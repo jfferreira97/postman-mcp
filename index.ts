@@ -6,6 +6,7 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { randomUUID } from "crypto";
 
 const POSTMAN_API_KEY = process.env.POSTMAN_API_KEY;
 if (!POSTMAN_API_KEY) {
@@ -77,15 +78,17 @@ function renderTree(items: any[], indent = 0): string {
     const pad    = "  ".repeat(indent + 1) + "  ";
 
     if (item.item) {
+      const idTag = item.id ? `  (id: ${item.id})` : "";
       const authLine = item.auth ? `\n${pad}${renderAuth(item.auth, "folder-scoped-auth")}` : "";
       const scriptLines = renderScripts(item.event, pad, "folder");
       const scriptBlock = scriptLines.length ? "\n" + scriptLines.join("\n") : "";
-      return `${prefix}[folder] ${item.name}${authLine}${scriptBlock}\n${renderTree(item.item, indent + 1)}`;
+      return `${prefix}[folder] ${item.name}${idTag}${authLine}${scriptBlock}\n${renderTree(item.item, indent + 1)}`;
     }
 
     const req    = item.request;
     const method = req?.method ?? "?";
     const url    = req?.url?.raw ?? req?.url ?? "";
+    const idTag  = item.id ? `  (id: ${item.id})` : "";
 
     const lines: string[] = [];
 
@@ -100,7 +103,7 @@ function renderTree(items: any[], indent = 0): string {
 
     lines.push(...renderScripts(item.event, pad, "request"));
 
-    return [`${prefix}[${method}] ${item.name}  →  ${url}`, ...lines].join("\n");
+    return [`${prefix}[${method}] ${item.name}${idTag}  →  ${url}`, ...lines].join("\n");
   }).join("\n");
 }
 
@@ -148,13 +151,22 @@ server.tool(
 
 server.tool(
   "update_collection",
-  "Push updated JSON back to a Postman collection by its UID",
+  "Nuclear option — replaces the entire collection in one PUT. Use only for bulk/structural changes that cannot be done atomically (e.g. reordering, schema-wide renames). For adding items use add_items; for editing a single item use update_item. Accepts either 'collection' (inline JSON) or 'filepath' (path to local JSON file — preferred for large collections to avoid token limits).",
   {
     uid: z.string().describe("The collection UID"),
-    collection: z.record(z.string(), z.unknown()).describe("The full collection JSON object"),
+    collection: z.record(z.string(), z.unknown()).optional().describe("The full collection JSON object (omit if using filepath)"),
+    filepath: z.string().optional().describe("Absolute path to a local JSON file containing the collection (preferred for large collections)"),
   },
-  async ({ uid, collection }) => {
-    const { data } = await postman.put(`/collections/${uid}`, { collection });
+  async ({ uid, collection, filepath }) => {
+    let payload: any;
+    if (filepath) {
+      payload = JSON.parse(fs.readFileSync(filepath, "utf-8"));
+    } else if (collection) {
+      payload = collection;
+    } else {
+      throw new Error("Provide either 'collection' or 'filepath'");
+    }
+    const { data } = await postman.put(`/collections/${uid}`, { collection: payload });
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
@@ -192,6 +204,97 @@ server.tool(
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
+  }
+);
+
+// Traverse items by slash-separated folder path ("" = root). Returns the items array to insert into.
+function findTargetItems(root: any[], folderPath: string): any[] {
+  if (!folderPath) return root;
+  const parts = folderPath.split("/").filter(Boolean);
+  let current = root;
+  for (const part of parts) {
+    const folder = current.find((i: any) => i.item && i.name === part);
+    if (!folder) throw new Error(`Folder not found: "${part}" in path "${folderPath}"`);
+    current = folder.item;
+  }
+  return current;
+}
+
+// Recursively find an item by id. Returns [item, parentArray] so the caller can mutate in place.
+function findItemById(items: any[], id: string): [any, any[]] | null {
+  for (const item of items) {
+    if (item.id === id) return [item, items];
+    if (item.item) {
+      const found = findItemById(item.item, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+const AddEntrySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("folder"),
+    name: z.string().describe("Folder name"),
+    parent_path: z.string().optional().describe("Slash-separated path to parent folder. Omit for root."),
+    position: z.number().int().min(0).optional().describe("0-based insert position within the parent. Omits = append."),
+  }),
+  z.object({
+    type: z.literal("request"),
+    parent_path: z.string().optional().describe("Slash-separated path to target folder. Omit for root."),
+    position: z.number().int().min(0).optional().describe("0-based insert position within the folder. Omit = append."),
+    item: z.record(z.string(), z.unknown()).describe("Full Postman item object: { name, request: { method, url: { raw }, header?, body? } }"),
+  }),
+]);
+
+server.tool(
+  "add_items",
+  "Atomically add one or more folders and/or requests to a collection in a single GET+PUT round trip. All entries are processed before pushing, so batching multiple adds here costs one permission prompt instead of one per call. position is 0-based insert index (inserts without overwriting — existing items shift down); omit to append. UUIDs are generated automatically.",
+  { uid: z.string().describe("The collection UID"), entries: z.array(AddEntrySchema).min(1) },
+  async ({ uid, entries }) => {
+    const { data } = await postman.get(`/collections/${uid}`);
+    const col = data.collection;
+    const results: string[] = [];
+
+    for (const entry of entries) {
+      const target = findTargetItems(col.item ?? [], entry.parent_path ?? "");
+      if (entry.type === "folder") {
+        const newFolder = { id: randomUUID(), name: entry.name, item: [] };
+        entry.position !== undefined
+          ? target.splice(entry.position, 0, newFolder)
+          : target.push(newFolder);
+        results.push(`folder "${entry.name}" (id: ${newFolder.id})`);
+      } else {
+        const newItem: any = { id: randomUUID(), ...entry.item };
+        entry.position !== undefined
+          ? target.splice(entry.position, 0, newItem)
+          : target.push(newItem);
+        results.push(`request "${newItem.name ?? "(unnamed)"}" (id: ${newItem.id})`);
+      }
+    }
+
+    await postman.put(`/collections/${uid}`, { collection: col });
+    return { content: [{ type: "text", text: `Added:\n${results.map(r => `  • ${r}`).join("\n")}` }] };
+  }
+);
+
+server.tool(
+  "update_item",
+  "Atomically update a single folder or request by its ID — finds the item anywhere in the tree regardless of nesting depth and overwrites the fields you provide. IMPORTANT: merge is shallow, so if you include 'request' you must include the full request object (method + url + header + body + auth) — partial sub-objects will overwrite and lose the fields you omit. Always call get_collection first to read the current state of the item before constructing the patch. Does NOT touch the item's children (item[] array) — to add children use add_items targeting that folder's path.",
+  {
+    uid: z.string().describe("The collection UID"),
+    id: z.string().describe("The item ID (visible in get_collection / get_collection_structure output)"),
+    patch: z.record(z.string(), z.unknown()).describe("Fields to overwrite on the item. Merge is SHALLOW — nested objects are replaced wholesale, not merged. Always pass the FULL sub-object for any nested field you touch. For requests: { name?, request: { method, url: { raw }, header: [], body: {...}, auth: {...} } } — if you include 'request', include ALL its fields or the missing ones will be lost. For folders: { name?, auth?, description? }."),
+  },
+  async ({ uid, id, patch }) => {
+    const { data } = await postman.get(`/collections/${uid}`);
+    const col = data.collection;
+    const found = findItemById(col.item ?? [], id);
+    if (!found) throw new Error(`No item with id "${id}" found in collection`);
+    const [item] = found;
+    Object.assign(item, patch);
+    await postman.put(`/collections/${uid}`, { collection: col });
+    return { content: [{ type: "text", text: `Updated item "${item.name ?? id}"` }] };
   }
 );
 
