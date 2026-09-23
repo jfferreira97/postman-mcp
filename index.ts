@@ -166,7 +166,7 @@ server.tool(
     } else {
       throw new Error("Provide either 'collection' or 'filepath'");
     }
-    const { data } = await postman.put(`/collections/${uid}`, { collection: payload });
+    const data = await putCollection(uid, payload);
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
@@ -178,11 +178,11 @@ server.tool(
   "Fetch a Postman collection and save it as a local JSON file for editing",
   {
     uid: z.string().describe("The collection UID"),
-    filename: z.string().describe("Local filename to save to, e.g. my-collection.json"),
+    filename: z.string().describe("Filename (saved under the OS temp dir) or an absolute path, e.g. my-collection.json"),
   },
   async ({ uid, filename }) => {
     const { data } = await postman.get(`/collections/${uid}`);
-    const filepath = path.join(os.tmpdir(), filename);
+    const filepath = resolveLocalPath(filename);
     fs.writeFileSync(filepath, JSON.stringify(data.collection, null, 2));
     return {
       content: [{ type: "text", text: `Saved to ${filepath}` }],
@@ -195,17 +195,81 @@ server.tool(
   "Read a local JSON file and push it back to Postman as a collection update",
   {
     uid: z.string().describe("The collection UID"),
-    filename: z.string().describe("Local filename to read from, e.g. my-collection.json"),
+    filename: z.string().describe("Filename (read from the OS temp dir) or an absolute path, e.g. my-collection.json"),
   },
   async ({ uid, filename }) => {
-    const filepath = path.join(os.tmpdir(), filename);
+    const filepath = resolveLocalPath(filename);
     const collection = JSON.parse(fs.readFileSync(filepath, "utf-8"));
-    const { data } = await postman.put(`/collections/${uid}`, { collection });
+    const data = await putCollection(uid, collection);
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
   }
 );
+
+// Postman's PUT rebuilds url.raw from host/path/query and discards it when those are missing.
+function parseRawUrl(raw: string): any {
+  const url: any = { raw };
+  let rest = raw.trim();
+
+  const hashIdx = rest.indexOf("#");
+  if (hashIdx >= 0) {
+    url.hash = rest.slice(hashIdx + 1);
+    rest = rest.slice(0, hashIdx);
+  }
+
+  const queryIdx = rest.indexOf("?");
+  if (queryIdx >= 0) {
+    url.query = rest.slice(queryIdx + 1).split("&").filter(Boolean).map((pair) => {
+      const eq = pair.indexOf("=");
+      return eq < 0 ? { key: pair, value: null } : { key: pair.slice(0, eq), value: pair.slice(eq + 1) };
+    });
+    rest = rest.slice(0, queryIdx);
+  }
+
+  const protocolMatch = rest.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+  if (protocolMatch) {
+    url.protocol = protocolMatch[1];
+    rest = rest.slice(protocolMatch[0].length);
+  }
+
+  const slashIdx = rest.indexOf("/");
+  let hostPart = slashIdx < 0 ? rest : rest.slice(0, slashIdx);
+  const pathPart = slashIdx < 0 ? "" : rest.slice(slashIdx + 1);
+
+  const portMatch = hostPart.match(/:(\d+|\{\{[^}]+\}\})$/);
+  if (portMatch) {
+    url.port = portMatch[1];
+    hostPart = hostPart.slice(0, -portMatch[0].length);
+  }
+
+  url.host = /^\{\{[^}]+\}\}$/.test(hostPart) ? [hostPart] : hostPart.split(".");
+  if (pathPart) url.path = pathPart.split("/");
+  return url;
+}
+
+function normalizeRequestUrls(items: any[]): void {
+  for (const item of items ?? []) {
+    if (item.item) normalizeRequestUrls(item.item);
+    const req = item.request;
+    if (!req?.url) continue;
+    if (typeof req.url === "string") {
+      req.url = parseRawUrl(req.url);
+    } else if (req.url.raw && !req.url.host) {
+      req.url = { ...req.url, ...parseRawUrl(req.url.raw) };
+    }
+  }
+}
+
+async function putCollection(uid: string, collection: any): Promise<any> {
+  normalizeRequestUrls(collection.item);
+  const { data } = await postman.put(`/collections/${uid}`, { collection });
+  return data;
+}
+
+function resolveLocalPath(filename: string): string {
+  return path.isAbsolute(filename) ? filename : path.join(os.tmpdir(), filename);
+}
 
 // Traverse items by slash-separated folder path ("" = root). Returns the items array to insert into.
 function findTargetItems(root: any[], folderPath: string): any[] {
@@ -243,7 +307,7 @@ const AddEntrySchema = z.discriminatedUnion("type", [
     type: z.literal("request"),
     parent_path: z.string().optional().describe("Slash-separated path to target folder. Omit for root."),
     position: z.number().int().min(0).optional().describe("0-based insert position within the folder. Omit = append."),
-    item: z.record(z.string(), z.unknown()).describe("Full Postman item object: { name, request: { method, url: { raw }, header?, body? } }"),
+    item: z.record(z.string(), z.unknown()).describe("Full Postman item object: { name, event?, request: { method, url, header?, body?, auth? } }. url may be a plain string or { raw } — protocol/host/path/query are derived from raw automatically."),
   }),
 ]);
 
@@ -273,7 +337,7 @@ server.tool(
       }
     }
 
-    await postman.put(`/collections/${uid}`, { collection: col });
+    await putCollection(uid, col);
     return { content: [{ type: "text", text: `Added:\n${results.map(r => `  • ${r}`).join("\n")}` }] };
   }
 );
@@ -284,7 +348,7 @@ server.tool(
   {
     uid: z.string().describe("The collection UID"),
     id: z.string().describe("The item ID (visible in get_collection / get_collection_structure output)"),
-    patch: z.record(z.string(), z.unknown()).describe("Fields to overwrite on the item. Merge is SHALLOW — nested objects are replaced wholesale, not merged. Always pass the FULL sub-object for any nested field you touch. For requests: { name?, request: { method, url: { raw }, header: [], body: {...}, auth: {...} } } — if you include 'request', include ALL its fields or the missing ones will be lost. For folders: { name?, auth?, description? }."),
+    patch: z.record(z.string(), z.unknown()).describe("Fields to overwrite on the item. Merge is SHALLOW — nested objects are replaced wholesale, not merged. Always pass the FULL sub-object for any nested field you touch. For requests: { name?, event?, request: { method, url, header: [], body: {...}, auth: {...} } } (url may be a plain string or { raw } — parts are derived automatically) — if you include 'request', include ALL its fields or the missing ones will be lost. For folders: { name?, auth?, description? }."),
   },
   async ({ uid, id, patch }) => {
     const { data } = await postman.get(`/collections/${uid}`);
@@ -293,7 +357,7 @@ server.tool(
     if (!found) throw new Error(`No item with id "${id}" found in collection`);
     const [item] = found;
     Object.assign(item, patch);
-    await postman.put(`/collections/${uid}`, { collection: col });
+    await putCollection(uid, col);
     return { content: [{ type: "text", text: `Updated item "${item.name ?? id}"` }] };
   }
 );
